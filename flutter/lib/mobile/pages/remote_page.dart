@@ -19,6 +19,7 @@ import '../../common/widgets/overlay.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/remote_input.dart';
 import '../../models/input_model.dart';
+import '../../models/android_ime_input.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../models/shortcut_model.dart';
@@ -101,6 +102,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   final FocusNode _mobileFocusNode = FocusNode();
   final FocusNode _physicalFocusNode = FocusNode();
   var _showEdit = false; // use soft keyboard
+  bool _phoneGestures = true;
+  AndroidImeController? _androidIme;
+  Future<void> _androidInputQueue = Future.value();
 
   Worker? _waylandKeyboardGateWorker;
   bool _waylandKeyboardGateInitialized = false;
@@ -120,6 +124,10 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    if (isAndroid) {
+      _androidIme = AndroidImeController(_textController, _sendAndroidImeEdits);
+      _androidIme!.reset();
+    }
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
     gFFI.start(
       widget.id,
@@ -183,6 +191,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   @override
   Future<void> dispose() async {
+    _androidIme?.dispose();
     HardwareKeyboard.instance.removeHandler(_handleLocalKeyEvent);
     WidgetsBinding.instance.removeObserver(this);
     // Close the session up-front. `gFFI.close()` below only calls `sessionClose`
@@ -412,6 +421,71 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     }
   }
 
+  void _sendAndroidImeEdits(List<AndroidImeEdit> edits) {
+    final ctrl = inputModel.ctrl;
+    final alt = inputModel.alt;
+    final shift = inputModel.shift;
+    final command = inputModel.command;
+    final modifiers = ctrl || alt || shift || command;
+    _androidInputQueue = _androidInputQueue.then((_) async {
+      if (!mounted ||
+          !_showEdit ||
+          !inputModel.keyboardInputAllowed ||
+          !inputModel.keyboardPerm ||
+          inputModel.isViewOnly) return;
+      for (final edit in edits) {
+        if (!inputModel.keyboardInputAllowed ||
+            !inputModel.keyboardPerm ||
+            inputModel.isViewOnly) return;
+        if (!edit.isText) {
+          await bind.sessionInputKey(
+              sessionId: sessionId,
+              name: edit.value,
+              down: false,
+              press: true,
+              alt: false,
+              ctrl: false,
+              shift: false,
+              command: false);
+        } else {
+          // Preserve toolbar shortcuts and control keys; printable commits,
+          // including a single CJK character, always use the string API.
+          for (final part in edit.value.split('\n').asMap().entries) {
+            if (part.key > 0) {
+              await bind.sessionInputKey(
+                  sessionId: sessionId,
+                  name: 'VK_RETURN',
+                  down: false,
+                  press: true,
+                  alt: false,
+                  ctrl: false,
+                  shift: false,
+                  command: false);
+            }
+            if (part.value.isEmpty) continue;
+            if (modifiers && part.value.characters.length == 1) {
+              await bind.sessionInputKey(
+                  sessionId: sessionId,
+                  name: part.value == ' ' ? 'VK_SPACE' : part.value,
+                  down: false,
+                  press: true,
+                  alt: alt,
+                  ctrl: ctrl,
+                  shift: shift,
+                  command: command);
+            } else {
+              await bind.sessionInputString(
+                  sessionId: sessionId, value: part.value);
+            }
+          }
+        }
+      }
+    }).catchError((Object error, StackTrace stack) {
+      debugPrint('Android IME input failed: $error');
+    });
+    if (modifiers) _androidIme?.reset();
+  }
+
   // handle mobile virtual keyboard
   void handleSoftKeyboardInput(String newValue) {
     if (!inputModel.keyboardInputAllowed) {
@@ -462,8 +536,12 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     inputModel.keyboardInputAllowed = true;
     gFFI.invokeMethod("enable_soft_keyboard", true);
     // destroy first, so that our _value trick can work
-    _value = initText;
-    _textController.text = _value;
+    if (isAndroid) {
+      _androidIme!.reset();
+    } else {
+      _value = initText;
+      _textController.text = _value;
+    }
     setState(() => _showEdit = false);
     _timer?.cancel();
     _timer = Timer(kMobileDelaySoftKeyboard, () {
@@ -568,6 +646,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                                     : RawTouchGestureDetectorRegion(
                                         child: getBodyForMobile(),
                                         ffi: gFFI,
+                                        phoneGestures: _phoneGestures,
+                                        onRemotePointerAction: () =>
+                                            _androidIme?.reset(),
                                       ),
                               );
                             }),
@@ -718,6 +799,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               final chatKeyboardRequested =
                   gFFI.chatModel.softKeyboardRequested.value;
               return KeyHelpTools(
+                  onRemoteKey: isAndroid ? () => _androidIme?.reset() : null,
                   keyboardIsVisible: keyboardVisibilityController.isVisible &&
                       (_showEdit || chatKeyboardRequested),
                   showGestureHelp: _showGestureHelp);
@@ -749,7 +831,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                       //      2. The button will trigger `onKeyEvent` if the text field is empty.
                       // ko/zh/ja input method: the button will trigger `onKeyEvent`
                       //                     and the event will not popup if `KeyEventResult.handled` is returned.
-                      onChanged: handleSoftKeyboardInput,
+                      onChanged: isAndroid ? null : handleSoftKeyboardInput,
                     ).workaroundFreezeLinuxMint(),
             ),
           ];
@@ -945,16 +1027,34 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         child: SingleChildScrollView(
             controller: ScrollController(),
             padding: EdgeInsets.symmetric(vertical: 10),
-            child: GestureHelp(
-              touchMode: gFFI.ffiModel.touchMode,
-              onTouchModeChange: (t) {
-                gFFI.ffiModel.toggleTouchMode();
-                final v = gFFI.ffiModel.touchMode ? 'Y' : 'N';
-                bind.mainSetLocalOption(key: kOptionTouchMode, value: v);
-              },
-              virtualMouseMode: gFFI.ffiModel.virtualMouseMode,
-              inputModel: gFFI.inputModel,
-            )));
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              if (isAndroid &&
+                  gFFI.ffiModel.pi.platform == kPeerPlatformWindows)
+                SwitchListTile(
+                  title: const Text('スマホ操作'),
+                  subtitle: const Text('タップでクリック・1本指でスクロール・2本指で拡大と移動'),
+                  value: _phoneGestures,
+                  onChanged: (value) => setState(() => _phoneGestures = value),
+                ),
+              if (_phoneGestures &&
+                  isAndroid &&
+                  gFFI.ffiModel.pi.platform == kPeerPlatformWindows) ...[
+                const Text('長押し後の移動でドラッグ。3本指の操作は無効です。'),
+                TextButton(
+                    onPressed: () => inputModel.tap(MouseButtons.right),
+                    child: const Text('現在のポインター位置で右クリック')),
+              ] else
+                GestureHelp(
+                  touchMode: gFFI.ffiModel.touchMode,
+                  onTouchModeChange: (t) {
+                    gFFI.ffiModel.toggleTouchMode();
+                    final v = gFFI.ffiModel.touchMode ? 'Y' : 'N';
+                    bind.mainSetLocalOption(key: kOptionTouchMode, value: v);
+                  },
+                  virtualMouseMode: gFFI.ffiModel.virtualMouseMode,
+                  inputModel: gFFI.inputModel,
+                ),
+            ])));
   }
 
   // * Currently mobile does not enable map mode
@@ -980,12 +1080,15 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 class KeyHelpTools extends StatefulWidget {
   final bool keyboardIsVisible;
   final bool showGestureHelp;
+  final VoidCallback? onRemoteKey;
 
   /// need to show by external request, etc [keyboardIsVisible] or [changeTouchMode]
   bool get requestShow => keyboardIsVisible || showGestureHelp;
 
   KeyHelpTools(
-      {required this.keyboardIsVisible, required this.showGestureHelp});
+      {required this.keyboardIsVisible,
+      required this.showGestureHelp,
+      this.onRemoteKey});
 
   @override
   State<KeyHelpTools> createState() => _KeyHelpToolsState();
@@ -1018,7 +1121,10 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
             ? Icon(icon, size: 14, color: Colors.white)
             : Text(translate(text),
                 style: TextStyle(color: Colors.white, fontSize: 11)),
-        onPressed: onPressed);
+        onPressed: () {
+          widget.onRemoteKey?.call();
+          onPressed();
+        });
   }
 
   _updateRect() {

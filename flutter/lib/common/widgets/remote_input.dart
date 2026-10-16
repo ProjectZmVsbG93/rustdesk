@@ -12,6 +12,7 @@ import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 
 import './gestures.dart';
+import '../../mobile/widgets/phone_gestures.dart';
 
 class RawKeyFocusScope extends StatelessWidget {
   final FocusNode? focusNode;
@@ -62,6 +63,8 @@ class RawTouchGestureDetectorRegion extends StatefulWidget {
   final Widget child;
   final FFI ffi;
   final bool isCamera;
+  final bool phoneGestures;
+  final VoidCallback? onRemotePointerAction;
   late final InputModel inputModel = ffi.inputModel;
   late final FfiModel ffiModel = ffi.ffiModel;
 
@@ -69,6 +72,8 @@ class RawTouchGestureDetectorRegion extends StatefulWidget {
     required this.child,
     required this.ffi,
     this.isCamera = false,
+    this.phoneGestures = false,
+    this.onRemotePointerAction,
   });
 
   @override
@@ -116,9 +121,97 @@ class _RawTouchGestureDetectorRegionState
   bool get handleTouch => (isDesktop || isWebDesktop) || ffiModel.touchMode;
   SessionID get sessionId => ffi.sessionId;
   bool get canvasLocked => isMobile && ffi.canvasModel.locked;
+  Future<void> _phoneInputQueue = Future.value();
+  bool _phoneDragDown = false;
+  Offset _phoneScrollRemainder = Offset.zero;
+
+  void _queuePhoneInput(Future<void> Function() action) {
+    _phoneInputQueue = _phoneInputQueue
+        .then((_) => action())
+        .catchError((Object error, StackTrace stack) {
+      debugPrint('Phone gesture input failed: $error');
+    });
+  }
+
+  Widget _phoneGestureRegion() => PhoneGestureRegion(
+        child: widget.child,
+        configure: (recognizer) {
+          recognizer
+            ..onTap = (position) {
+              widget.onRemotePointerAction?.call();
+              _queuePhoneInput(() async {
+                if (inputModel.isViewOnly || !inputModel.keyboardPerm) return;
+                if (await ffi.cursorModel.move(position.dx, position.dy)) {
+                  await inputModel.tap(MouseButtons.left);
+                }
+              });
+            }
+            ..onScroll = (origin, delta) {
+              _queuePhoneInput(() async {
+                if (inputModel.isViewOnly || !inputModel.keyboardPerm) return;
+                // Locate the hovered Windows control without pressing a button.
+                if (!await ffi.cursorModel.move(origin.dx, origin.dy)) return;
+                final amount = _phoneScrollRemainder + delta * 2.5;
+                final dx = amount.dx.truncate();
+                final dy = amount.dy.truncate();
+                _phoneScrollRemainder =
+                    amount - Offset(dx.toDouble(), dy.toDouble());
+                if (dx == 0 && dy == 0) return;
+                final reverse = bind.sessionGetReverseMouseWheelSync(
+                            sessionId: sessionId) ==
+                        'Y'
+                    ? -1
+                    : 1;
+                await bind.sessionSendMouse(
+                    sessionId: sessionId,
+                    msg: json.encode({
+                      'type': 'trackpad',
+                      'x': '${dx * reverse}',
+                      'y': '${dy * reverse}',
+                    }));
+              });
+            }
+            ..onDragStart = (position) {
+              widget.onRemotePointerAction?.call();
+              _queuePhoneInput(() async {
+                if (inputModel.isViewOnly || !inputModel.keyboardPerm) return;
+                if (await ffi.cursorModel.move(position.dx, position.dy)) {
+                  await inputModel.tapDown(MouseButtons.left);
+                  _phoneDragDown = true;
+                }
+              });
+            }
+            ..onDragUpdate = ((position) => _queuePhoneInput(() async {
+                  if (_phoneDragDown) {
+                    await ffi.cursorModel.move(position.dx, position.dy);
+                  }
+                }))
+            ..onDragEnd = (() => _queuePhoneInput(() async {
+                  if (_phoneDragDown) {
+                    _phoneDragDown = false;
+                    await bind.sessionSendMouse(
+                        sessionId: sessionId,
+                        msg: json.encode({'type': 'up', 'buttons': 'left'}));
+                  }
+                }))
+            ..onTransform = (scale, focalPoint, delta) {
+              if (canvasLocked) return;
+              ffi.canvasModel.updateScale(scale, focalPoint);
+              ffi.canvasModel.panX(delta.dx);
+              ffi.canvasModel.panY(delta.dy);
+            };
+        },
+      );
 
   @override
   Widget build(BuildContext context) {
+    if (widget.phoneGestures &&
+        isAndroid &&
+        !widget.isCamera &&
+        ffiModel.pi.platform == kPeerPlatformWindows &&
+        !inputModel.relativeMouseMode.value) {
+      return _phoneGestureRegion();
+    }
     return RawGestureDetector(
       child: widget.child,
       gestures: makeGestures(context),
