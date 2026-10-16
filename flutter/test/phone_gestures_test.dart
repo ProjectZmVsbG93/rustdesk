@@ -34,12 +34,16 @@ void main() {
       (tester) async {
     final scrolls = <Offset>[];
     final transforms = <double>[];
+    final pans = <Offset>[];
     var clicks = 0;
     await tester.pumpWidget(PhoneGestureRegion(
       configure: (r) => r
         ..onTap = ((_) => clicks++)
         ..onScroll = ((_, delta) => scrolls.add(delta))
-        ..onTransform = ((scale, _, __) => transforms.add(scale)),
+        ..onTransform = ((scale, _, delta) {
+          transforms.add(scale);
+          pans.add(delta);
+        }),
       child: const SizedBox.expand(),
     ));
     final one = await tester.startGesture(const Offset(100, 100), pointer: 1);
@@ -47,6 +51,10 @@ void main() {
     final two = await tester.startGesture(const Offset(200, 60), pointer: 2);
     await two.moveBy(const Offset(20, 0));
     expect(transforms.single, closeTo(1.2, 0.001));
+    await one.moveBy(const Offset(10, 20));
+    await two.moveBy(const Offset(10, 20));
+    expect(transforms.reduce((a, b) => a * b), closeTo(1.2, 0.001));
+    expect(pans.reduce((a, b) => a + b), const Offset(20, 20));
     final three = await tester.startGesture(const Offset(150, 150), pointer: 3);
     await one.moveBy(const Offset(0, -50));
     await three.up();
@@ -54,7 +62,7 @@ void main() {
     await two.up();
     await one.moveBy(const Offset(0, -50));
     await one.up();
-    expect(transforms.length, 1);
+    expect(transforms.length, 3);
     expect(scrolls.length, 1);
     expect(clicks, 0);
     await tester.tapAt(const Offset(80, 80));
@@ -97,5 +105,12 @@ void main() {
     await finger.moveBy(const Offset(20, 20));
     await finger.cancel();
     expect([downs, moves, ups, remoteTaps], [1, 1, 1, 0]);
+    final held = await tester.startGesture(const Offset(100, 100), pointer: 4);
+    await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
+    final second =
+        await tester.startGesture(const Offset(200, 100), pointer: 5);
+    await second.up();
+    await held.up();
+    expect([downs, ups, remoteTaps], [2, 2, 0]);
   });
 }

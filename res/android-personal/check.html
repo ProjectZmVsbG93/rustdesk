@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RustDesk Personal 入力確認</title>
+<style>
+  body { font: 16px system-ui, sans-serif; margin: 24px; max-width: 1100px; }
+  textarea { box-sizing: border-box; width: 100%; min-height: 160px; font: 20px system-ui; }
+  button { padding: 8px 16px; margin: 4px; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: #f2f4f7; }
+  #viewport { overflow: auto; width: 100%; height: 340px; border: 2px solid #3474ac; }
+  #grid { display: grid; grid-template-columns: repeat(12, 150px); gap: 24px; padding: 24px; width: max-content; background: repeating-linear-gradient(0deg, #eef5ff, #eef5ff 120px, #fff 120px, #fff 240px); }
+  #grid button { height: 80px; }
+</style>
+<h1>RustDesk Personal 入力確認</h1>
+<p>Windowsのブラウザでこのファイルを開き、Androidから遠隔操作してください。このページは外部通信や入力内容の保存を行いません。メモ帳でも同じ文字列を確認してください。</p>
+<ol>
+  <li>下の入力欄をタップし、AndroidでGboard日本語を表示します。変換途中ではPCに文字が出ず、確定後に一度だけ反映されることを確認します。</li>
+  <li>「は→ば→ぱ」「や→ゃ」「つ→っ」「きょう→今日」、別候補、直前の確定語の再変換、削除と追加入力、長文、改行、Ctrl+C/V/Aを試します。</li>
+  <li>下の番号ボタンで縦横スクロール、2本指ピンチと表示移動、拡大後のタップ位置、ダブルクリック、長押しドラッグ、3本指による抑止を確認します。</li>
+</ol>
+<p>入力例：こんにちは / コンピューター / ばぱゃっ / 今日 / ABC123 !? / 😀 / 👨‍👩‍👧‍👦 / が</p>
+<label for="input">入力欄（パスワードなどは入力しないでください）</label>
+<textarea id="input" autocomplete="off" spellcheck="false"></textarea>
+<pre id="result" aria-live="polite">文字数: 0</pre>
+<h2>スクロールとクリック位置</h2>
+<p>1本指スワイプではボタンが押されず、内容が進むことを確認します。2本指ではWindows側のスクロール位置が変わらず、Android側の表示だけが動きます。</p>
+<p id="clicked" aria-live="polite">まだクリックされていません。</p>
+<div id="viewport"><div id="grid"></div></div>
+<p>3本指を置いた後は全て離すまでボタンのクリック・PCスクロールが発生しないことを確認してください。</p>
+<h2>入力イベント（直近20件）</h2>
+<pre id="events"></pre>
+<script>
+  const input = document.getElementById('input');
+  const result = document.getElementById('result');
+  const events = document.getElementById('events');
+  const log = [];
+  const segmenter = typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter('ja', {granularity: 'grapheme'}) : null;
+  for (const type of ['beforeinput', 'input', 'keydown', 'compositionstart', 'compositionend']) {
+    input.addEventListener(type, event => {
+      const value = input.value;
+      const clusters = segmenter ? [...segmenter.segment(value)].length : '未対応';
+      result.textContent = `UTF-16: ${value.length} / コードポイント: ${[...value].length} / 書記素: ${clusters}\n${JSON.stringify(value)}`;
+      log.push(`${event.type} ${event.inputType || event.key || ''} ${JSON.stringify(event.data || '')}`);
+      events.textContent = log.slice(-20).join('\n');
+    });
+  }
+  const grid = document.getElementById('grid');
+  for (let row = 1; row <= 12; row++) {
+    for (let col = 1; col <= 12; col++) {
+      const button = document.createElement('button');
+      button.textContent = `${row}行 ${col}列`;
+      for (const type of ['click', 'dblclick']) {
+        button.addEventListener(type, () => {
+          document.getElementById('clicked').textContent = `${button.textContent}: ${type}`;
+        });
+      }
+      grid.appendChild(button);
+    }
+  }
+</script>
+</html>

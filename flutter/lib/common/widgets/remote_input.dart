@@ -195,10 +195,14 @@ class _RawTouchGestureDetectorRegionState
                   }
                 }))
             ..onTransform = (scale, focalPoint, delta) {
-              if (canvasLocked) return;
-              ffi.canvasModel.updateScale(scale, focalPoint);
-              ffi.canvasModel.panX(delta.dx);
-              ffi.canvasModel.panY(delta.dy);
+              // Keep queued cursor coordinates in the canvas transform that
+              // belonged to that event when switching from scroll to pinch.
+              _queuePhoneInput(() async {
+                if (!mounted || canvasLocked) return;
+                ffi.canvasModel.updateScale(scale, focalPoint);
+                ffi.canvasModel.panX(delta.dx);
+                ffi.canvasModel.panY(delta.dy);
+              });
             };
         },
       );

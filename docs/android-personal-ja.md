@@ -76,6 +76,7 @@ flutter analyze --no-fatal-infos lib/models/android_ime_input.dart \
 
 - 新規6テストを含む全体テスト: 123成功、1スキップ。
 - 変更箇所の解析: エラー・警告なし。既存APIの非推奨情報4件。
+- 全体解析: エラーなし。変更していない `lib/common.dart` の未使用import警告1件、情報55件のため標準コマンドの終了値は1。
 - Android APKビルド結果と実行ログは成果物に併記します。
 - Android実機は接続されていないため、Android→Windowsの実機試験は未実施です。
 
@@ -132,6 +133,7 @@ ActionsのSecretsに `ANDROID_SIGNING_KEY`（keystoreのBase64）、`ANDROID_ALI
 ## 実機で確認する項目・制限
 
 Windowsのメモ帳とブラウザのテキストエリアで、Android側はGboard日本語を選んで確認します。
+[確認用HTML](../res/android-personal/check.html)をWindowsのブラウザで開くと、入力文字列・Unicodeの文字数・入力イベント、縦横スクロールとクリック位置を確認できます。
 Windows側のIMEは最初は英数モードにし、次に日本語IME有効でも試してください。
 
 1. タップ位置、ダブルクリック、上下・左右スクロール。スクロール開始時に選択やクリックが発生しないこと。
@@ -161,6 +163,7 @@ Backspaceや左右キーが書記素クラスタを何単位で扱うかはWindo
 - `flutter/android/app/build.gradle` とManifest: 個人ビルド時のアプリID・ラベル・署名・リンク設定。通常ビルドの識別子は維持。
 - `flutter/test/android_ime_input_test.dart`、`flutter/test/phone_gestures_test.dart`: 回帰テスト。
 - `.github/workflows/android-personal.yml`: 手動の個人APKビルド。
+- `res/android-personal/check.html`: Windowsブラウザで開く手動確認用ページ。
 
 接続方式、認証、サーバー、暗号化、映像転送、Rust/ネイティブ入力実装、FFI、通信仕様は変更していません。
 共有ファイルへの変更は新経路のフックに限り、機能無効時は元の実装へ戻ります。
