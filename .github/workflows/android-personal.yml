@@ -1,0 +1,162 @@
+name: Android Personal APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-personal-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  android:
+    needs: bridge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RUSTDESK_ANDROID_PERSONAL: 'true'
+      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+    steps:
+      - uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake curl gcc-multilib g++-multilib \
+            libclang-dev libunwind-dev libasound2-dev libgtk-3-dev libpulse-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libva-dev \
+            libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxdo-dev \
+            libxfixes-dev llvm-dev nasm ninja-build pkg-config openjdk-17-jdk-headless
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.24.5'
+          channel: stable
+          cache: true
+
+      - name: Apply upstream Flutter patch
+        run: git -C "$FLUTTER_ROOT" apply "$GITHUB_WORKSPACE/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Analyze and test
+        working-directory: flutter
+        run: |
+          flutter pub get
+          flutter analyze --no-fatal-infos lib/models/android_ime_input.dart \
+            lib/mobile/widgets/phone_gestures.dart lib/mobile/pages/remote_page.dart \
+            lib/common/widgets/remote_input.dart test/android_ime_input_test.dart \
+            test/phone_gestures_test.dart
+          flutter test
+
+      - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
+        id: ndk
+        with:
+          ndk-version: r28c
+          add-to-path: true
+
+      - name: Export vcpkg cache configuration
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+          doNotCache: false
+
+      - name: Build native dependencies
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: ./flutter/build_android_deps.sh arm64-v8a
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: '1.75'
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: personal-android-native
+
+      - name: Build native client from this checkout
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cargo install cargo-ndk --version 3.1.2 --locked
+          ./flutter/ndk_arm64.sh
+          mkdir -p flutter/android/app/src/main/jniLibs/arm64-v8a
+          cp target/aarch64-linux-android/release/liblibrustdesk.so \
+            flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+          cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+            flutter/android/app/src/main/jniLibs/arm64-v8a/
+
+      # Preserve the development signing identity between builds. For a private
+      # release key, set the four upstream-compatible ANDROID_* secrets below.
+      - uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        with:
+          path: ~/.android/debug.keystore
+          key: personal-android-development-key-v1
+
+      - name: Configure optional personal signing key
+        env:
+          KEY_BASE64: ${{ secrets.ANDROID_SIGNING_KEY }}
+          KEY_ALIAS: ${{ secrets.ANDROID_ALIAS }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEY_BASE64" ]; then
+            printf '%s' "$KEY_BASE64" | base64 --decode > flutter/android/app/personal.jks
+            python3 - <<'PY'
+          import os
+          from pathlib import Path
+          def escape(s):
+              return s.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r').replace('=', '\\=').replace(':', '\\:')
+          fields = dict(storeFile='personal.jks', keyAlias=os.environ['KEY_ALIAS'],
+                        storePassword=os.environ['STORE_PASSWORD'], keyPassword=os.environ['KEY_PASSWORD'])
+          Path('flutter/android/key.properties').write_text(''.join(f'{k}={escape(v)}\n' for k,v in fields.items()))
+          PY
+          fi
+
+      - name: Build personal ARM64 APK
+        working-directory: flutter
+        env:
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+        run: |
+          export PATH="$JAVA_HOME/bin:$PATH"
+          sed -i 's/-Xmx1024M/-Xmx2g/' android/gradle.properties
+          flutter build apk --release --target-platform android-arm64 --split-per-abi
+          cd build/app/outputs/flutter-apk
+          sha256sum app-arm64-v8a-release.apk > SHA256SUMS
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rustdesk-personal-arm64-${{ github.sha }}
+          path: |
+            flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            flutter/build/app/outputs/flutter-apk/SHA256SUMS
+          if-no-files-found: error
